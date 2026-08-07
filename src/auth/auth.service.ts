@@ -1,7 +1,10 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { UsersService } from '../users/users.service.js';
 import { successResponse } from '../common/helpers/response.helper.js';
-import { hashPassword, comparePassword } from '../common/helpers/bcrypt.js';
+import {
+  hashPassword,
+  comparePassword,
+} from '../common/helpers/password.helper.js';
 import { RegisterDto } from './dto/register.js';
 import { LoginDto } from './dto/login.js';
 
@@ -42,7 +45,6 @@ export class AuthService {
         username: user.username,
         email: user.email,
         role: user.role,
-        createdAt: user.createdAt,
       },
       'Login berhasil',
     );
