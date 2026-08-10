@@ -39,6 +39,12 @@ export class UsersService {
     return user ? this.toEntity(user) : null;
   }
 
+  async findByUsernameWithPassword(username: string) {
+    return this.prisma.user.findUnique({
+      where: { username },
+    });
+  }
+
   async findCredentialsByUsername(username: string) {
     return this.prisma.user.findUnique({ where: { username } });
   }

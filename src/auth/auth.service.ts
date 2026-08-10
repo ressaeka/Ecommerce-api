@@ -1,16 +1,30 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { JwtService } from '@nestjs/jwt';
+
 import { UsersService } from '../users/users.service.js';
 import { successResponse } from '../common/helpers/response.helper.js';
+
 import {
   hashPassword,
   comparePassword,
 } from '../common/helpers/password.helper.js';
+
 import { RegisterDto } from './dto/register.js';
 import { LoginDto } from './dto/login.js';
+import { RefreshTokenDto } from './dto/refresh.token.js';
+import { ForgotPasswordDto } from './dto/forgot.password.js';
+
+import { MailService } from '../common/mail/mail.service.js';
 
 @Injectable()
 export class AuthService {
-  constructor(private readonly usersService: UsersService) {}
+  constructor(
+    private readonly usersService: UsersService,
+    private readonly jwtService: JwtService,
+    private readonly configService: ConfigService,
+    private readonly mailService: MailService,
+  ) {}
 
   async register(dto: RegisterDto) {
     const hashedPassword = await hashPassword(dto.password);
@@ -20,11 +34,13 @@ export class AuthService {
       password: hashedPassword,
     });
 
+    await this.mailService.sendWelcomeEmail(user.email, user.username);
+
     return successResponse(user, 'User berhasil didaftarkan');
   }
 
   async login(dto: LoginDto) {
-    const user = await this.usersService.findCredentialsByUsername(
+    const user = await this.usersService.findByUsernameWithPassword(
       dto.username,
     );
 
@@ -32,21 +48,115 @@ export class AuthService {
       throw new UnauthorizedException('Username atau password salah');
     }
 
-    const isMatch = await comparePassword(dto.password, user.password);
+    const isPasswordValid = await comparePassword(dto.password, user.password);
 
-    if (!isMatch) {
+    if (!isPasswordValid) {
       throw new UnauthorizedException('Username atau password salah');
     }
 
-    return successResponse(
+    const accessToken = await this.jwtService.signAsync(
       {
+        sub: user.id,
+        username: user.username,
+        role: user.role,
+      },
+      {
+        secret: this.configService.getOrThrow<string>('JWT_SECRET'),
+        expiresIn: '15m',
+      },
+    );
+
+    const refreshToken = await this.jwtService.signAsync(
+      {
+        sub: user.id,
+      },
+      {
+        secret: this.configService.getOrThrow<string>('JWT_REFRESH_SECRET'),
+        expiresIn: '7d',
+      },
+    );
+
+    return {
+      user: {
         id: user.id,
         name: user.name,
         username: user.username,
         email: user.email,
         role: user.role,
       },
-      'Login berhasil',
-    );
+      access_token: accessToken,
+      refresh_token: refreshToken,
+    };
+  }
+
+  async refresh(dto: RefreshTokenDto) {
+    try {
+      const payload = await this.jwtService.verifyAsync<{
+        sub: number;
+      }>(dto.refreshToken, {
+        secret: this.configService.getOrThrow<string>('JWT_REFRESH_SECRET'),
+      });
+
+      const user = await this.usersService.findById(payload.sub);
+
+      if (!user) {
+        throw new UnauthorizedException('User tidak ditemukan');
+      }
+
+      const newAccessToken = await this.jwtService.signAsync(
+        {
+          sub: user.id,
+          username: user.username,
+          role: user.role,
+        },
+        {
+          secret: this.configService.getOrThrow<string>('JWT_SECRET'),
+          expiresIn: '15m',
+        },
+      );
+
+      const newRefreshToken = await this.jwtService.signAsync(
+        {
+          sub: user.id,
+        },
+        {
+          secret: this.configService.getOrThrow<string>('JWT_REFRESH_SECRET'),
+          expiresIn: '7d',
+        },
+      );
+
+      return {
+        access_token: newAccessToken,
+        refresh_token: newRefreshToken,
+      };
+    } catch {
+      throw new UnauthorizedException(
+        'Refresh token tidak valid atau sudah kadaluarsa',
+      );
+    }
+  }
+
+  async forgot(dto: ForgotPasswordDto) {
+    const user = await this.usersService.findByEmail(dto.email);
+
+    if (!user) {
+      return {
+        message: 'Jika email terdaftar, OTP reset password akan dikirim',
+      };
+    }
+
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+
+    const expiresInMinutes = 10;
+
+    await this.mailService.sendResetPasswordOtp({
+      to: user.email,
+      otp,
+      expiresInMinutes,
+    });
+
+    return {
+      message: 'Jika email terdaftar, OTP reset password akan dikirim',
+    };
   }
 }
