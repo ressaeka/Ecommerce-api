@@ -1,4 +1,4 @@
-import { Body, Controller, Post } from '@nestjs/common';
+import { Body, Controller, HttpCode, HttpStatus, Post } from '@nestjs/common';
 
 import { AuthService } from './auth.service.js';
 
@@ -28,6 +28,7 @@ export class AuthController {
   }
 
   @Post('login')
+  @HttpCode(HttpStatus.OK)
   login(
     @Body(new ZodValidationPipe(loginSchema))
     dto: LoginDto,
@@ -36,6 +37,7 @@ export class AuthController {
   }
 
   @Post('refresh')
+  @HttpCode(HttpStatus.OK)
   refresh(
     @Body(new ZodValidationPipe(refreshTokenSchema))
     dto: RefreshTokenDto,
@@ -44,6 +46,7 @@ export class AuthController {
   }
 
   @Post('forgot')
+  @HttpCode(HttpStatus.OK)
   forgot(
     @Body(new ZodValidationPipe(forgotPasswordSchema))
     dto: ForgotPasswordDto,

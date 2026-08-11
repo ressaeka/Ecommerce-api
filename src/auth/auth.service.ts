@@ -76,17 +76,20 @@ export class AuthService {
       },
     );
 
-    return {
-      user: {
-        id: user.id,
-        name: user.name,
-        username: user.username,
-        email: user.email,
-        role: user.role,
+    return successResponse(
+      {
+        user: {
+          id: user.id,
+          name: user.name,
+          username: user.username,
+          email: user.email,
+          role: user.role,
+        },
+        access_token: accessToken,
+        refresh_token: refreshToken,
       },
-      access_token: accessToken,
-      refresh_token: refreshToken,
-    };
+      'Login berhasil',
+    );
   }
 
   async refresh(dto: RefreshTokenDto) {
@@ -125,10 +128,13 @@ export class AuthService {
         },
       );
 
-      return {
-        access_token: newAccessToken,
-        refresh_token: newRefreshToken,
-      };
+      return successResponse(
+        {
+          access_token: newAccessToken,
+          refresh_token: newRefreshToken,
+        },
+        'Token berhasil diperbarui',
+      );
     } catch {
       throw new UnauthorizedException(
         'Refresh token tidak valid atau sudah kadaluarsa',
@@ -139,24 +145,21 @@ export class AuthService {
   async forgot(dto: ForgotPasswordDto) {
     const user = await this.usersService.findByEmail(dto.email);
 
-    if (!user) {
-      return {
-        message: 'Jika email terdaftar, OTP reset password akan dikirim',
-      };
+    if (user) {
+      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+
+      const expiresInMinutes = 10;
+
+      await this.mailService.sendResetPasswordOtp({
+        to: user.email,
+        otp,
+        expiresInMinutes,
+      });
     }
 
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-
-    const expiresInMinutes = 10;
-
-    await this.mailService.sendResetPasswordOtp({
-      to: user.email,
-      otp,
-      expiresInMinutes,
-    });
-
-    return {
-      message: 'Jika email terdaftar, OTP reset password akan dikirim',
-    };
+    return successResponse(
+      null,
+      'Jika email terdaftar, OTP reset password akan dikirim',
+    );
   }
 }
