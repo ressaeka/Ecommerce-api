@@ -14,7 +14,10 @@ import { RegisterDto } from './dto/register.js';
 import { LoginDto } from './dto/login.js';
 import { RefreshTokenDto } from './dto/refresh.token.js';
 import { ForgotPasswordDto } from './dto/forgot.password.js';
+import { VerifyDto } from './dto/verify.otp.js';
+import { ResetPasswordDto } from './dto/reset.password.js';
 
+import { RedisService } from '../common/redis/redis.service.js';
 import { MailService } from '../common/mail/mail.service.js';
 
 @Injectable()
@@ -24,6 +27,7 @@ export class AuthService {
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
     private readonly mailService: MailService,
+    private readonly redisService: RedisService,
   ) {}
 
   async register(dto: RegisterDto) {
@@ -149,6 +153,17 @@ export class AuthService {
       const otp = Math.floor(100000 + Math.random() * 900000).toString();
 
       const expiresInMinutes = 10;
+      
+      const key = `otp:${user.email}`;
+
+      await this.redisService.set(
+        key,
+        otp,
+        expiresInMinutes * 60,
+      );
+
+      console.log('OTP KEY:', key);
+      console.log('OTP:', otp);
 
       await this.mailService.sendResetPasswordOtp({
         to: user.email,
@@ -161,5 +176,70 @@ export class AuthService {
       null,
       'Jika email terdaftar, OTP reset password akan dikirim',
     );
+  }
+  async verifyOtp(dto: VerifyDto) {
+    const user = await this.usersService.findByEmail(dto.email);
+
+    if (!user) {
+      throw new UnauthorizedException('OTP tidak valid atau sudah kadaluarsa');
+    }
+
+    const storedOtp = await this.redisService.get(`otp:${user.email}`);
+
+    if (!storedOtp) {
+      throw new UnauthorizedException('OTP tidak valid atau sudah kadaluarsa');
+    }
+
+    if (storedOtp !== dto.otp.toString()) {
+      throw new UnauthorizedException('OTP tidak valid atau sudah kadaluarsa');
+    }
+
+    const resetToken = await this.jwtService.signAsync(
+      {
+        sub: user.id,
+        purpose: 'password-reset',
+      },
+      {
+        secret: this.configService.getOrThrow<string>('JWT_RESET_SECRET'),
+        expiresIn: '10m',
+      },
+    );
+
+    await this.redisService.del(`otp:${user.email}`);
+
+    return successResponse({ resetToken }, 'OTP berhasil diverifikasi');
+  }
+
+  async resetPassword(dto: ResetPasswordDto) {
+    try {
+      const payload = await this.jwtService.verifyAsync<{
+        sub: number;
+        purpose: string;
+      }>(dto.resetToken, {
+        secret: this.configService.getOrThrow<string>('JWT_RESET_SECRET'),
+      });
+
+      if (payload.purpose !== 'password-reset') {
+        throw new UnauthorizedException('Reset token tidak valid');
+      }
+
+      const user = await this.usersService.findById(payload.sub);
+
+      if (!user) {
+        throw new UnauthorizedException('Reset token tidak valid');
+      }
+
+      const hashedPassword = await hashPassword(dto.newPassword);
+
+      await this.usersService.update(user.id, {
+        password: hashedPassword,
+      });
+
+      return successResponse(null, 'Password berhasil direset');
+    } catch {
+      throw new UnauthorizedException(
+        'Reset token tidak valid atau sudah kadaluarsa',
+      );
+    }
   }
 }
