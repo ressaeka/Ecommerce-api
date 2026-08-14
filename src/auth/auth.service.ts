@@ -153,17 +153,9 @@ export class AuthService {
       const otp = Math.floor(100000 + Math.random() * 900000).toString();
 
       const expiresInMinutes = 10;
-      
       const key = `otp:${user.email}`;
 
-      await this.redisService.set(
-        key,
-        otp,
-        expiresInMinutes * 60,
-      );
-
-      console.log('OTP KEY:', key);
-      console.log('OTP:', otp);
+      await this.redisService.set(key, otp, expiresInMinutes * 60);
 
       await this.mailService.sendResetPasswordOtp({
         to: user.email,
