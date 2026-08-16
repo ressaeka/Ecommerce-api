@@ -12,7 +12,11 @@ export class RedisService implements OnModuleDestroy {
 
     this.logger.log(`Connecting to Redis: ${redisUrl}`);
 
-    this.redis = new Redis(redisUrl);
+    this.redis = new Redis(redisUrl, {
+      lazyConnect: true,
+      maxRetriesPerRequest: 1,
+      retryStrategy: (times) => Math.min(times * 200, 2000),
+    });
 
     this.redis.on('connect', () => {
       this.logger.log('Redis connected');
@@ -28,7 +32,7 @@ export class RedisService implements OnModuleDestroy {
   }
 
   async set(key: string, value: string, ttlInSeconds?: number): Promise<void> {
-    if (ttlInSeconds) {
+    if (ttlInSeconds !== undefined) {
       await this.redis.set(key, value, 'EX', ttlInSeconds);
       return;
     }
@@ -42,6 +46,22 @@ export class RedisService implements OnModuleDestroy {
 
   async del(key: string): Promise<void> {
     await this.redis.del(key);
+  }
+
+  async incr(key: string): Promise<number> {
+    return this.redis.incr(key);
+  }
+
+  async expire(key: string, ttlInSeconds: number): Promise<void> {
+    await this.redis.expire(key, ttlInSeconds);
+  }
+
+  async incrWithTtl(key: string, ttlInSeconds: number): Promise<number> {
+    const count = await this.redis.incr(key);
+    if (count === 1) {
+      await this.redis.expire(key, ttlInSeconds);
+    }
+    return count;
   }
 
   async onModuleDestroy() {
