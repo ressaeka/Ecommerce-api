@@ -19,6 +19,7 @@ import { ResetPasswordDto } from './dto/reset.password.js';
 
 import { RedisService } from '../common/redis/redis.service.js';
 import { MailService } from '../common/mail/mail.service.js';
+import { randomUUID } from 'crypto';
 
 @Injectable()
 export class AuthService {
@@ -70,14 +71,23 @@ export class AuthService {
       },
     );
 
+    const refreshTokenJti = randomUUID();
+
     const refreshToken = await this.jwtService.signAsync(
       {
         sub: user.id,
+        jti: refreshTokenJti,
       },
       {
         secret: this.configService.getOrThrow<string>('JWT_REFRESH_SECRET'),
         expiresIn: '7d',
       },
+    );
+
+    await this.redisService.set(
+      `refresh:${refreshTokenJti}`,
+      `active:${user.id}`,
+      7 * 24 * 60 * 60,
     );
 
     return successResponse(
@@ -100,15 +110,40 @@ export class AuthService {
     try {
       const payload = await this.jwtService.verifyAsync<{
         sub: number;
+        jti: string;
       }>(dto.refreshToken, {
         secret: this.configService.getOrThrow<string>('JWT_REFRESH_SECRET'),
       });
+
+      if (!payload.jti) {
+        throw new UnauthorizedException('Refresh token tidak valid');
+      }
+
+      const oldKey = `refresh:${payload.jti}`;
+
+      const session = await this.redisService.get(oldKey);
+
+      if (!session) {
+        throw new UnauthorizedException(
+          'Refresh token tidak valid atau sudah kadaluarsa',
+        );
+      }
+
+      if (session.startsWith('revoked:')) {
+        throw new UnauthorizedException('Refresh token reuse detected');
+      }
 
       const user = await this.usersService.findById(payload.sub);
 
       if (!user) {
         throw new UnauthorizedException('User tidak ditemukan');
       }
+
+      await this.redisService.set(
+        oldKey,
+        `revoked:${user.id}`,
+        7 * 24 * 60 * 60,
+      );
 
       const newAccessToken = await this.jwtService.signAsync(
         {
@@ -122,14 +157,23 @@ export class AuthService {
         },
       );
 
+      const newJti = randomUUID();
+
       const newRefreshToken = await this.jwtService.signAsync(
         {
           sub: user.id,
+          jti: newJti,
         },
         {
           secret: this.configService.getOrThrow<string>('JWT_REFRESH_SECRET'),
           expiresIn: '7d',
         },
+      );
+
+      await this.redisService.set(
+        `refresh:${newJti}`,
+        `active:${user.id}`,
+        7 * 24 * 60 * 60,
       );
 
       return successResponse(
@@ -139,7 +183,11 @@ export class AuthService {
         },
         'Token berhasil diperbarui',
       );
-    } catch {
+    } catch (error) {
+      if (error instanceof UnauthorizedException) {
+        throw error;
+      }
+
       throw new UnauthorizedException(
         'Refresh token tidak valid atau sudah kadaluarsa',
       );
@@ -232,6 +280,23 @@ export class AuthService {
       throw new UnauthorizedException(
         'Reset token tidak valid atau sudah kadaluarsa',
       );
+    }
+  }
+
+  async logout(dto: RefreshTokenDto) {
+    try {
+      const payload = await this.jwtService.verifyAsync<{
+        sub: number;
+        jti: string;
+      }>(dto.refreshToken, {
+        secret: this.configService.getOrThrow<string>('JWT_REFRESH_SECRET'),
+      });
+
+      await this.redisService.del(`refresh:${payload.jti}`);
+
+      return successResponse(null, 'Logout berhasil');
+    } catch {
+      throw new UnauthorizedException('Refresh token tidak valid');
     }
   }
 }

@@ -1,14 +1,22 @@
 import { Body, Controller, HttpCode, HttpStatus, Post } from '@nestjs/common';
+
 import { AuthService } from './auth.service.js';
+
 import { ZodValidationPipe } from '../common/pipes/zod-validation.pipe.js';
+
 import { registerSchema, RegisterDto } from './dto/register.js';
+
 import { loginSchema, LoginDto } from './dto/login.js';
+
 import { RefreshTokenDto, refreshTokenSchema } from './dto/refresh.token.js';
+
 import {
   ForgotPasswordDto,
   forgotPasswordSchema,
 } from './dto/forgot.password.js';
+
 import { VerifyDto, verifyOtpSchema } from './dto/verify.otp.js';
+
 import { ResetPasswordDto, resetPasswordSchema } from './dto/reset.password.js';
 
 @Controller('auth')
@@ -66,5 +74,14 @@ export class AuthController {
     dto: ResetPasswordDto,
   ) {
     return this.authService.resetPassword(dto);
+  }
+
+  @Post('logout')
+  @HttpCode(HttpStatus.OK)
+  logout(
+    @Body(new ZodValidationPipe(refreshTokenSchema))
+    dto: RefreshTokenDto,
+  ) {
+    return this.authService.logout(dto);
   }
 }
