@@ -1,4 +1,11 @@
-import { Body, Controller, HttpCode, HttpStatus, Post } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  HttpCode,
+  HttpStatus,
+  Post,
+  Req,
+} from '@nestjs/common';
 
 import { AuthService } from './auth.service.js';
 
@@ -9,7 +16,7 @@ import { registerSchema, RegisterDto } from './dto/register.js';
 import { loginSchema, LoginDto } from './dto/login.js';
 
 import { RefreshTokenDto, refreshTokenSchema } from './dto/refresh.token.js';
-
+import type { Request } from 'express';
 import {
   ForgotPasswordDto,
   forgotPasswordSchema,
@@ -36,8 +43,9 @@ export class AuthController {
   login(
     @Body(new ZodValidationPipe(loginSchema))
     dto: LoginDto,
+    @Req() req: Request,
   ) {
-    return this.authService.login(dto);
+    return this.authService.login(dto, req.ip ?? 'unknown');
   }
 
   @Post('refresh')

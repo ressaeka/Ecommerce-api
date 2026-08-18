@@ -1,25 +1,26 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
+import { randomInt, randomUUID } from 'crypto';
 
 import { UsersService } from '../users/users.service.js';
 import { successResponse } from '../common/helpers/response.helper.js';
 
 import {
-  hashPassword,
   comparePassword,
+  hashPassword,
 } from '../common/helpers/password.helper.js';
 
-import { RegisterDto } from './dto/register.js';
-import { LoginDto } from './dto/login.js';
-import { RefreshTokenDto } from './dto/refresh.token.js';
-import { ForgotPasswordDto } from './dto/forgot.password.js';
-import { VerifyDto } from './dto/verify.otp.js';
-import { ResetPasswordDto } from './dto/reset.password.js';
+import { type RegisterDto } from './dto/register.js';
+import { type LoginDto } from './dto/login.js';
+import { type RefreshTokenDto } from './dto/refresh.token.js';
+import { type ForgotPasswordDto } from './dto/forgot.password.js';
+import { type VerifyDto } from './dto/verify.otp.js';
+import { type ResetPasswordDto } from './dto/reset.password.js';
 
 import { RedisService } from '../common/redis/redis.service.js';
 import { MailService } from '../common/mail/mail.service.js';
-import { randomUUID } from 'crypto';
+import { LoginRateLimitService } from '../common/helpers/rate-limit.helper.js';
 
 @Injectable()
 export class AuthService {
@@ -29,6 +30,7 @@ export class AuthService {
     private readonly configService: ConfigService,
     private readonly mailService: MailService,
     private readonly redisService: RedisService,
+    private readonly loginRateLimitService: LoginRateLimitService,
   ) {}
 
   async register(dto: RegisterDto) {
@@ -44,21 +46,51 @@ export class AuthService {
     return successResponse(user, 'User berhasil didaftarkan');
   }
 
-  async login(dto: LoginDto) {
+  async login(dto: LoginDto, ip: string) {
     const user = await this.usersService.findByUsernameWithPassword(
       dto.username,
     );
 
+    /*
+     * User tidak ditemukan.
+     *
+     * Tetap hit rate limiter supaya attacker
+     * tidak bisa mencoba username tanpa batas.
+     */
     if (!user) {
-      throw new UnauthorizedException('Username atau password salah');
+      await this.loginRateLimitService.handleFailure(dto.username, ip);
+
+      /*
+       * Guard untuk memastikan flow berhenti
+       * dan TypeScript mengetahui bahwa user
+       * tidak mungkin null setelah blok ini.
+       */
+      return;
     }
 
+    /*
+     * Password validation.
+     */
     const isPasswordValid = await comparePassword(dto.password, user.password);
 
+    /*
+     * Password salah.
+     */
     if (!isPasswordValid) {
-      throw new UnauthorizedException('Username atau password salah');
+      await this.loginRateLimitService.handleFailure(dto.username, ip);
     }
 
+    /*
+     * Login berhasil.
+     *
+     * Hanya reset counter username.
+     * Counter IP tetap dibiarkan sampai TTL habis.
+     */
+    await this.loginRateLimitService.resetUsername(dto.username);
+
+    /*
+     * Access Token
+     */
     const accessToken = await this.jwtService.signAsync(
       {
         sub: user.id,
@@ -71,12 +103,21 @@ export class AuthService {
       },
     );
 
+    /*
+     * Refresh Token Family
+     */
+    const familyId = randomUUID();
+
+    /*
+     * Unique JTI untuk refresh token.
+     */
     const refreshTokenJti = randomUUID();
 
     const refreshToken = await this.jwtService.signAsync(
       {
         sub: user.id,
         jti: refreshTokenJti,
+        familyId,
       },
       {
         secret: this.configService.getOrThrow<string>('JWT_REFRESH_SECRET'),
@@ -84,10 +125,20 @@ export class AuthService {
       },
     );
 
+    const ttl = 7 * 24 * 60 * 60;
+
+    /*
+     * Simpan session/family.
+     */
+    await this.redisService.set(`family:${familyId}`, `active:${user.id}`, ttl);
+
+    /*
+     * Simpan refresh token.
+     */
     await this.redisService.set(
       `refresh:${refreshTokenJti}`,
-      `active:${user.id}`,
-      7 * 24 * 60 * 60,
+      `active:${user.id}:${familyId}`,
+      ttl,
     );
 
     return successResponse(
@@ -105,22 +156,52 @@ export class AuthService {
       'Login berhasil',
     );
   }
-
   async refresh(dto: RefreshTokenDto) {
     try {
+      /*
+       * Verify signature dan expiration refresh token.
+       */
       const payload = await this.jwtService.verifyAsync<{
         sub: number;
         jti: string;
+        familyId: string;
       }>(dto.refreshToken, {
         secret: this.configService.getOrThrow<string>('JWT_REFRESH_SECRET'),
       });
 
-      if (!payload.jti) {
+      /*
+       * Pastikan claim security tersedia.
+       */
+      if (!payload.jti || !payload.familyId) {
         throw new UnauthorizedException('Refresh token tidak valid');
+      }
+
+      const familyKey = `family:${payload.familyId}`;
+
+      /*
+       * Ambil status session/family.
+       */
+      const family = await this.redisService.get(familyKey);
+
+      if (!family) {
+        throw new UnauthorizedException(
+          'Session tidak valid atau sudah kadaluarsa',
+        );
+      }
+
+      /*
+       * Kalau family sudah revoked,
+       * semua refresh token dalam family tersebut invalid.
+       */
+      if (family.startsWith('revoked:')) {
+        throw new UnauthorizedException('Session sudah dicabut');
       }
 
       const oldKey = `refresh:${payload.jti}`;
 
+      /*
+       * Cek apakah refresh token masih active.
+       */
       const session = await this.redisService.get(oldKey);
 
       if (!session) {
@@ -129,22 +210,47 @@ export class AuthService {
         );
       }
 
+      /*
+       * Kalau token lama sudah revoked,
+       * berarti terjadi refresh-token reuse.
+       */
       if (session.startsWith('revoked:')) {
+        /*
+         * Reuse detection:
+         *
+         * Kalau attacker menggunakan refresh token lama,
+         * seluruh family kita revoke.
+         */
+        await this.redisService.set(
+          familyKey,
+          `revoked:${payload.sub}`,
+          7 * 24 * 60 * 60,
+        );
+
         throw new UnauthorizedException('Refresh token reuse detected');
       }
 
+      /*
+       * Pastikan user masih ada.
+       */
       const user = await this.usersService.findById(payload.sub);
 
       if (!user) {
         throw new UnauthorizedException('User tidak ditemukan');
       }
 
+      /*
+       * Revoke refresh token lama.
+       */
       await this.redisService.set(
         oldKey,
         `revoked:${user.id}`,
         7 * 24 * 60 * 60,
       );
 
+      /*
+       * Generate access token baru.
+       */
       const newAccessToken = await this.jwtService.signAsync(
         {
           sub: user.id,
@@ -157,12 +263,21 @@ export class AuthService {
         },
       );
 
+      /*
+       * Generate JTI baru.
+       */
       const newJti = randomUUID();
 
+      /*
+       * Generate refresh token baru.
+       *
+       * Family ID tetap sama.
+       */
       const newRefreshToken = await this.jwtService.signAsync(
         {
           sub: user.id,
           jti: newJti,
+          familyId: payload.familyId,
         },
         {
           secret: this.configService.getOrThrow<string>('JWT_REFRESH_SECRET'),
@@ -170,9 +285,12 @@ export class AuthService {
         },
       );
 
+      /*
+       * Simpan refresh token baru sebagai active.
+       */
       await this.redisService.set(
         `refresh:${newJti}`,
-        `active:${user.id}`,
+        `active:${user.id}:${payload.familyId}`,
         7 * 24 * 60 * 60,
       );
 
@@ -184,10 +302,17 @@ export class AuthService {
         'Token berhasil diperbarui',
       );
     } catch (error) {
+      /*
+       * Jangan bungkus ulang UnauthorizedException.
+       */
       if (error instanceof UnauthorizedException) {
         throw error;
       }
 
+      /*
+       * Semua error JWT/verification lainnya
+       * dibuat menjadi response generic.
+       */
       throw new UnauthorizedException(
         'Refresh token tidak valid atau sudah kadaluarsa',
       );
@@ -197,14 +322,40 @@ export class AuthService {
   async forgot(dto: ForgotPasswordDto) {
     const user = await this.usersService.findByEmail(dto.email);
 
+    /*
+     * Kalau user tidak ada, tetap response sukses
+     * untuk mencegah user enumeration.
+     */
     if (user) {
-      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+      /*
+       * Generate cryptographically secure 6-digit OTP.
+       */
+      const otp = randomInt(100000, 1000000).toString();
+
+      /*
+       * Jangan simpan OTP plaintext di Redis.
+       */
+      const hashedOtp = await hashPassword(otp);
 
       const expiresInMinutes = 10;
-      const key = `otp:${user.email}`;
+      const ttl = expiresInMinutes * 60;
 
-      await this.redisService.set(key, otp, expiresInMinutes * 60);
+      const otpKey = `otp:${user.email}`;
+      const attemptKey = `otp-attempts:${user.email}`;
 
+      /*
+       * OTP baru → reset jumlah attempt.
+       */
+      await this.redisService.del(attemptKey);
+
+      /*
+       * Simpan hash OTP selama 10 menit.
+       */
+      await this.redisService.set(otpKey, hashedOtp, ttl);
+
+      /*
+       * Kirim OTP melalui email.
+       */
       await this.mailService.sendResetPasswordOtp({
         to: user.email,
         otp,
@@ -217,6 +368,7 @@ export class AuthService {
       'Jika email terdaftar, OTP reset password akan dikirim',
     );
   }
+
   async verifyOtp(dto: VerifyDto) {
     const user = await this.usersService.findByEmail(dto.email);
 
@@ -224,16 +376,47 @@ export class AuthService {
       throw new UnauthorizedException('OTP tidak valid atau sudah kadaluarsa');
     }
 
-    const storedOtp = await this.redisService.get(`otp:${user.email}`);
+    const otpKey = `otp:${user.email}`;
+    const attemptKey = `otp-attempts:${user.email}`;
+
+    /*
+     * Ambil hash OTP dari Redis.
+     */
+    const storedOtp = await this.redisService.get(otpKey);
 
     if (!storedOtp) {
       throw new UnauthorizedException('OTP tidak valid atau sudah kadaluarsa');
     }
 
-    if (storedOtp !== dto.otp.toString()) {
+    /*
+     * Compare OTP plaintext dengan hash.
+     */
+    const isOtpValid = await comparePassword(dto.otp.toString(), storedOtp);
+
+    /*
+     * OTP salah.
+     */
+    if (!isOtpValid) {
+      const attempts = await this.redisService.incrWithTtl(attemptKey, 10 * 60);
+
+      /*
+       * Maximum 5 attempts.
+       */
+      if (attempts >= 5) {
+        await this.redisService.del(otpKey);
+        await this.redisService.del(attemptKey);
+
+        throw new UnauthorizedException('Terlalu banyak percobaan OTP');
+      }
+
       throw new UnauthorizedException('OTP tidak valid atau sudah kadaluarsa');
     }
 
+    /*
+     * OTP benar.
+     *
+     * Buat reset token.
+     */
     const resetToken = await this.jwtService.signAsync(
       {
         sub: user.id,
@@ -245,13 +428,29 @@ export class AuthService {
       },
     );
 
-    await this.redisService.del(`otp:${user.email}`);
+    /*
+     * OTP bersifat single-use.
+     */
+    await this.redisService.del(otpKey);
 
-    return successResponse({ resetToken }, 'OTP berhasil diverifikasi');
+    /*
+     * Counter attempt juga dibersihkan.
+     */
+    await this.redisService.del(attemptKey);
+
+    return successResponse(
+      {
+        resetToken,
+      },
+      'OTP berhasil diverifikasi',
+    );
   }
 
   async resetPassword(dto: ResetPasswordDto) {
     try {
+      /*
+       * Verify reset token.
+       */
       const payload = await this.jwtService.verifyAsync<{
         sub: number;
         purpose: string;
@@ -259,24 +458,40 @@ export class AuthService {
         secret: this.configService.getOrThrow<string>('JWT_RESET_SECRET'),
       });
 
+      /*
+       * Pastikan token memang dibuat
+       * khusus untuk password reset.
+       */
       if (payload.purpose !== 'password-reset') {
         throw new UnauthorizedException('Reset token tidak valid');
       }
 
+      /*
+       * Pastikan user masih ada.
+       */
       const user = await this.usersService.findById(payload.sub);
 
       if (!user) {
         throw new UnauthorizedException('Reset token tidak valid');
       }
 
+      /*
+       * Hash password baru.
+       */
       const hashedPassword = await hashPassword(dto.newPassword);
 
+      /*
+       * Update password.
+       */
       await this.usersService.update(user.id, {
         password: hashedPassword,
       });
 
       return successResponse(null, 'Password berhasil direset');
     } catch {
+      /*
+       * Jangan expose detail JWT error.
+       */
       throw new UnauthorizedException(
         'Reset token tidak valid atau sudah kadaluarsa',
       );
@@ -285,17 +500,52 @@ export class AuthService {
 
   async logout(dto: RefreshTokenDto) {
     try {
+      /*
+       * Verify refresh token.
+       */
       const payload = await this.jwtService.verifyAsync<{
         sub: number;
         jti: string;
+        familyId: string;
       }>(dto.refreshToken, {
         secret: this.configService.getOrThrow<string>('JWT_REFRESH_SECRET'),
       });
 
-      await this.redisService.del(`refresh:${payload.jti}`);
+      if (!payload.jti || !payload.familyId) {
+        throw new UnauthorizedException('Refresh token tidak valid');
+      }
+
+      const familyKey = `family:${payload.familyId}`;
+
+      /*
+       * Pastikan family/session masih ada.
+       */
+      const family = await this.redisService.get(familyKey);
+
+      if (!family) {
+        throw new UnauthorizedException(
+          'Session tidak valid atau sudah kadaluarsa',
+        );
+      }
+
+      /*
+       * Revoke seluruh refresh-token family.
+       */
+      await this.redisService.set(
+        familyKey,
+        `revoked:${payload.sub}`,
+        7 * 24 * 60 * 60,
+      );
 
       return successResponse(null, 'Logout berhasil');
-    } catch {
+    } catch (error) {
+      /*
+       * Jangan bungkus ulang UnauthorizedException.
+       */
+      if (error instanceof UnauthorizedException) {
+        throw error;
+      }
+
       throw new UnauthorizedException('Refresh token tidak valid');
     }
   }
