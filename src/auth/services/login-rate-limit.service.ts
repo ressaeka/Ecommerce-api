@@ -5,7 +5,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 
-import { RedisService } from '../redis/redis.service.js';
+import { RedisService } from '../../common/redis/redis.service.js';
 
 @Injectable()
 export class LoginRateLimitService {

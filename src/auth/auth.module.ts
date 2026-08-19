@@ -9,6 +9,9 @@ import { AuthService } from './auth.service.js';
 import { UsersModule } from '../users/users.module.js';
 import { JwtStrategy } from './strategies/jwt.strategy.js';
 import { MailModule } from '../common/mail/mail.module.js';
+import { LoginRateLimitService } from './services/login-rate-limit.service.js';
+import { ForgotRateLimitService } from './services/forgot-rate-limit.service.js';
+import { OtpRateLimitService } from './services/otp-rate-limit.service.js';
 
 @Module({
   imports: [
@@ -32,7 +35,13 @@ import { MailModule } from '../common/mail/mail.module.js';
 
   controllers: [AuthController],
 
-  providers: [AuthService, JwtStrategy],
+  providers: [
+    AuthService,
+    JwtStrategy,
+    LoginRateLimitService,
+    ForgotRateLimitService,
+    OtpRateLimitService,
+  ],
 
   exports: [AuthService],
 })

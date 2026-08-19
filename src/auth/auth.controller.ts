@@ -58,12 +58,12 @@ export class AuthController {
   }
 
   @Post('forgot')
-  @HttpCode(HttpStatus.OK)
   forgot(
     @Body(new ZodValidationPipe(forgotPasswordSchema))
     dto: ForgotPasswordDto,
+    @Req() req: Request,
   ) {
-    return this.authService.forgot(dto);
+    return this.authService.forgot(dto, req.ip ?? 'unknown');
   }
 
   @Post('verify-otp')
@@ -71,8 +71,9 @@ export class AuthController {
   verifyOtp(
     @Body(new ZodValidationPipe(verifyOtpSchema))
     dto: VerifyDto,
+    @Req() req: Request,
   ) {
-    return this.authService.verifyOtp(dto);
+    return this.authService.verifyOtp(dto, req.ip ?? 'unknown');
   }
 
   @Post('reset-password')

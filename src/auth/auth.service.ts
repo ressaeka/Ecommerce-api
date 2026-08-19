@@ -20,7 +20,9 @@ import { type ResetPasswordDto } from './dto/reset.password.js';
 
 import { RedisService } from '../common/redis/redis.service.js';
 import { MailService } from '../common/mail/mail.service.js';
-import { LoginRateLimitService } from '../common/helpers/rate-limit.helper.js';
+import { LoginRateLimitService } from './services/login-rate-limit.service.js';
+import { ForgotRateLimitService } from './services/forgot-rate-limit.service.js';
+import { OtpRateLimitService } from './services/otp-rate-limit.service.js';
 
 @Injectable()
 export class AuthService {
@@ -31,6 +33,8 @@ export class AuthService {
     private readonly mailService: MailService,
     private readonly redisService: RedisService,
     private readonly loginRateLimitService: LoginRateLimitService,
+    private readonly forgotRateLimitService: ForgotRateLimitService,
+    private readonly otpRateLimitService: OtpRateLimitService,
   ) {}
 
   async register(dto: RegisterDto) {
@@ -60,32 +64,17 @@ export class AuthService {
     if (!user) {
       await this.loginRateLimitService.handleFailure(dto.username, ip);
 
-      /*
-       * Guard untuk memastikan flow berhenti
-       * dan TypeScript mengetahui bahwa user
-       * tidak mungkin null setelah blok ini.
-       */
-      return;
+      throw new UnauthorizedException('Username atau password salah');
     }
 
-    /*
-     * Password validation.
-     */
     const isPasswordValid = await comparePassword(dto.password, user.password);
 
-    /*
-     * Password salah.
-     */
     if (!isPasswordValid) {
       await this.loginRateLimitService.handleFailure(dto.username, ip);
+
+      throw new UnauthorizedException('Username atau password salah');
     }
 
-    /*
-     * Login berhasil.
-     *
-     * Hanya reset counter username.
-     * Counter IP tetap dibiarkan sampai TTL habis.
-     */
     await this.loginRateLimitService.resetUsername(dto.username);
 
     /*
@@ -319,43 +308,29 @@ export class AuthService {
     }
   }
 
-  async forgot(dto: ForgotPasswordDto) {
+  async forgot(dto: ForgotPasswordDto, ip: string) {
+    await this.forgotRateLimitService.handleRequest(dto.email, ip);
+
     const user = await this.usersService.findByEmail(dto.email);
 
     /*
      * Kalau user tidak ada, tetap response sukses
-     * untuk mencegah user enumeration.
+     * untuk mencegah account enumeration.
      */
     if (user) {
-      /*
-       * Generate cryptographically secure 6-digit OTP.
-       */
       const otp = randomInt(100000, 1000000).toString();
 
-      /*
-       * Jangan simpan OTP plaintext di Redis.
-       */
       const hashedOtp = await hashPassword(otp);
 
       const expiresInMinutes = 10;
       const ttl = expiresInMinutes * 60;
 
       const otpKey = `otp:${user.email}`;
-      const attemptKey = `otp-attempts:${user.email}`;
 
-      /*
-       * OTP baru → reset jumlah attempt.
-       */
-      await this.redisService.del(attemptKey);
+      await this.otpRateLimitService.reset(user.email);
 
-      /*
-       * Simpan hash OTP selama 10 menit.
-       */
       await this.redisService.set(otpKey, hashedOtp, ttl);
 
-      /*
-       * Kirim OTP melalui email.
-       */
       await this.mailService.sendResetPasswordOtp({
         to: user.email,
         otp,
@@ -369,7 +344,7 @@ export class AuthService {
     );
   }
 
-  async verifyOtp(dto: VerifyDto) {
+  async verifyOtp(dto: VerifyDto, ip: string) {
     const user = await this.usersService.findByEmail(dto.email);
 
     if (!user) {
@@ -377,7 +352,6 @@ export class AuthService {
     }
 
     const otpKey = `otp:${user.email}`;
-    const attemptKey = `otp-attempts:${user.email}`;
 
     /*
      * Ambil hash OTP dari Redis.
@@ -395,19 +369,11 @@ export class AuthService {
 
     /*
      * OTP salah.
+     *
+     * Hit rate limiter (email + IP).
      */
     if (!isOtpValid) {
-      const attempts = await this.redisService.incrWithTtl(attemptKey, 10 * 60);
-
-      /*
-       * Maximum 5 attempts.
-       */
-      if (attempts >= 5) {
-        await this.redisService.del(otpKey);
-        await this.redisService.del(attemptKey);
-
-        throw new UnauthorizedException('Terlalu banyak percobaan OTP');
-      }
+      await this.otpRateLimitService.handleAttempt(user.email, ip);
 
       throw new UnauthorizedException('OTP tidak valid atau sudah kadaluarsa');
     }
@@ -436,7 +402,7 @@ export class AuthService {
     /*
      * Counter attempt juga dibersihkan.
      */
-    await this.redisService.del(attemptKey);
+    await this.otpRateLimitService.reset(user.email);
 
     return successResponse(
       {
