@@ -448,10 +448,11 @@ export class AuthService {
 
       /*
        * Update password.
+       *
+       * UsersService.updatePassword menerima
+       * password yang sudah di-hash.
        */
-      await this.usersService.update(user.id, {
-        password: hashedPassword,
-      });
+      await this.usersService.updatePassword(user.id, hashedPassword);
 
       return successResponse(null, 'Password berhasil direset');
     } catch {
