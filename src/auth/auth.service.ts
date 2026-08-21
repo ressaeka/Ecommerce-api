@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { randomInt, randomUUID } from 'crypto';
@@ -26,6 +26,8 @@ import { OtpRateLimitService } from './services/otp-rate-limit.service.js';
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(
     private readonly usersService: UsersService,
     private readonly jwtService: JwtService,
@@ -45,7 +47,21 @@ export class AuthService {
       password: hashedPassword,
     });
 
-    await this.mailService.sendWelcomeEmail(user.email, user.username);
+    /*
+     * Email dikirim secara non-blocking.
+     *
+     * Kalau email gagal dikirim, registrasi tetap sukses
+     * dan error hanya dicatat di log.
+     */
+    void this.mailService
+      .sendWelcomeEmail(user.email, user.username)
+      .catch((error) => {
+        this.logger.error(
+          `Welcome email gagal dikirim: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      });
 
     return successResponse(user, 'User berhasil didaftarkan');
   }
@@ -229,13 +245,27 @@ export class AuthService {
       }
 
       /*
-       * Revoke refresh token lama.
+       * Revoke refresh token lama secara atomik.
+       *
+       * Kalau sudah ada request lain yang meng-claim
+       * (SET NX gagal), anggap ini reuse/race
+       * dan revoke seluruh family.
        */
-      await this.redisService.set(
+      const claimed = await this.redisService.setIfNotExists(
         oldKey,
         `revoked:${user.id}`,
         7 * 24 * 60 * 60,
       );
+
+      if (!claimed) {
+        await this.redisService.set(
+          familyKey,
+          `revoked:${payload.sub}`,
+          7 * 24 * 60 * 60,
+        );
+
+        throw new UnauthorizedException('Refresh token reuse detected');
+      }
 
       /*
        * Generate access token baru.
@@ -448,11 +478,13 @@ export class AuthService {
 
       /*
        * Update password.
-       *
-       * UsersService.updatePassword menerima
-       * password yang sudah di-hash.
        */
       await this.usersService.updatePassword(user.id, hashedPassword);
+
+      /*
+       * Password berubah = semua session lama tidak valid.
+       */
+      await this.revokeAllUserSessions(user.id);
 
       return successResponse(null, 'Password berhasil direset');
     } catch {
@@ -514,6 +546,32 @@ export class AuthService {
       }
 
       throw new UnauthorizedException('Refresh token tidak valid');
+    }
+  }
+
+  /*
+   * Hapus semua session user (family + refresh token).
+   */
+  private async revokeAllUserSessions(userId: number): Promise<void> {
+    const [familyKeys, refreshKeys] = await Promise.all([
+      this.redisService.scanKeys('family:*'),
+      this.redisService.scanKeys('refresh:*'),
+    ]);
+
+    for (const key of familyKeys) {
+      const value = await this.redisService.get(key);
+
+      if (value && value.endsWith(`:${userId}`)) {
+        await this.redisService.del(key);
+      }
+    }
+
+    for (const key of refreshKeys) {
+      const value = await this.redisService.get(key);
+
+      if (value && value.includes(`:${userId}:`)) {
+        await this.redisService.del(key);
+      }
     }
   }
 }

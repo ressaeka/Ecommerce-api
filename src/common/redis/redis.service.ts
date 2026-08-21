@@ -64,6 +64,50 @@ export class RedisService implements OnModuleDestroy {
     return count;
   }
 
+  /*
+   * Set hanya kalau key belum ada.
+   *
+   * Dipakai untuk operasi yang harus atomik,
+   * misalnya rotasi refresh token.
+   */
+  async setIfNotExists(
+    key: string,
+    value: string,
+    ttlInSeconds: number,
+  ): Promise<boolean> {
+    const result = await this.redis.set(key, value, 'EX', ttlInSeconds, 'NX');
+
+    return result === 'OK';
+  }
+
+  /*
+   * Scan key dengan pattern.
+   *
+   * Dipakai saat perlu mencari key
+   * yang tidak punya index, misalnya family session.
+   */
+  async scanKeys(pattern: string): Promise<string[]> {
+    const keys: string[] = [];
+
+    let cursor = '0';
+
+    do {
+      const [nextCursor, found] = await this.redis.scan(
+        cursor,
+        'MATCH',
+        pattern,
+        'COUNT',
+        100,
+      );
+
+      cursor = nextCursor;
+
+      keys.push(...found);
+    } while (cursor !== '0');
+
+    return keys;
+  }
+
   async onModuleDestroy() {
     await this.redis.quit();
   }

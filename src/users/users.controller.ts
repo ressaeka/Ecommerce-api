@@ -15,6 +15,9 @@ import { ZodValidationPipe } from '../common/pipes/zod-validation.pipe.js';
 import { successResponse } from '../common/helpers/response.helper.js';
 import { Roles } from '../common/decorators/roles.decorator.js';
 import { RolesGuard } from '../common/guards/roles.guard.js';
+import { Permissions } from '../common/decorators/permissions.decorator.js';
+import { PermissionsGuard } from '../common/guards/permissions.guard.js';
+import { PERMISSIONS } from '../common/permissions/permission.js';
 import { updateUserSchema, UpdateUserDto } from './dto/update-user.dto.js';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard.js';
 import { queryUsersSchema, QueryUsersDto } from './dto/query-users.dto.js';
@@ -25,20 +28,9 @@ import { AuthenticatedUser } from './entities/authenticated-user.js';
 export class UsersController {
   constructor(private readonly usersService: UsersService) {}
 
-  @Get()
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('ADMIN')
-  async findAll(
-    @Query(new ZodValidationPipe(queryUsersSchema))
-    query: QueryUsersDto,
-  ) {
-    const users = await this.usersService.findAll(query);
-
-    return successResponse(users, 'Users berhasil diambil');
-  }
-
   @Get('me')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @Permissions(PERMISSIONS.PROFILE_READ)
   async findMe(@CurrentUser() user: AuthenticatedUser) {
     const identity = await this.usersService.findById(user.id);
 
@@ -46,7 +38,8 @@ export class UsersController {
   }
 
   @Patch('me')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @Permissions(PERMISSIONS.PROFILE_UPDATE)
   async updateMe(
     @CurrentUser() user: AuthenticatedUser,
 
@@ -58,18 +51,40 @@ export class UsersController {
     return successResponse(identity, 'Profil berhasil diperbarui');
   }
 
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('ADMIN')
+  @Delete('me')
+  @UseGuards(JwtAuthGuard)
+  async deleteMe(@CurrentUser() user: AuthenticatedUser) {
+    const result = await this.usersService.remove(user.id);
+
+    return successResponse(result, 'Akun berhasil dihapus');
+  }
+
   @Get(':id')
+  @UseGuards(JwtAuthGuard, RolesGuard, PermissionsGuard)
+  @Roles('ADMIN')
+  @Permissions(PERMISSIONS.USER_READ)
   async findById(@Param('id', ParseIntPipe) id: number) {
     const user = await this.usersService.findById(id);
 
     return successResponse(user, 'User berhasil diambil');
   }
 
-  @Patch(':id')
-  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Get()
+  @UseGuards(JwtAuthGuard, RolesGuard, PermissionsGuard)
   @Roles('ADMIN')
+  @Permissions(PERMISSIONS.USER_READ)
+  async findAll(
+    @Query(new ZodValidationPipe(queryUsersSchema))
+    query: QueryUsersDto,
+  ) {
+    const users = await this.usersService.findAll(query);
+
+    return successResponse(users, 'Users berhasil diambil');
+  }
+  @Patch(':id')
+  @UseGuards(JwtAuthGuard, RolesGuard, PermissionsGuard)
+  @Roles('ADMIN')
+  @Permissions(PERMISSIONS.USER_UPDATE)
   async update(
     @Param('id', ParseIntPipe) id: number,
 
@@ -82,8 +97,9 @@ export class UsersController {
   }
 
   @Delete(':id')
-  @UseGuards(JwtAuthGuard, RolesGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard, PermissionsGuard)
   @Roles('ADMIN')
+  @Permissions(PERMISSIONS.USER_DELETE)
   async remove(@Param('id', ParseIntPipe) id: number) {
     const result = await this.usersService.remove(id);
 

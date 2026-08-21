@@ -15,6 +15,26 @@ import { User } from './entities/user.entity.js';
 export class UsersService {
   constructor(private readonly prisma: PrismaService) {}
 
+  async updatePassword(id: number, hashedPassword: string): Promise<void> {
+    try {
+      await this.prisma.user.update({
+        where: { id },
+        data: {
+          password: hashedPassword,
+        },
+      });
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2025'
+      ) {
+        throw new NotFoundException(`User ${id} tidak ditemukan`);
+      }
+
+      throw error;
+    }
+  }
+
   async createUser(data: Prisma.UserCreateInput): Promise<User> {
     const existing = await this.prisma.user.findFirst({
       where: {
@@ -76,7 +96,7 @@ export class UsersService {
   }
 
   async findAll(query: QueryUsersDto) {
-    const { page, limit } = query;
+    const { page, limit, search } = query;
 
     /*
      * Contoh:
@@ -92,11 +112,23 @@ export class UsersService {
      */
     const skip = (page - 1) * limit;
 
+    const where: Prisma.UserWhereInput = search
+      ? {
+          OR: [
+            { name: { contains: search, mode: 'insensitive' } },
+            { username: { contains: search, mode: 'insensitive' } },
+            { email: { contains: search, mode: 'insensitive' } },
+          ],
+        }
+      : {};
+
     /*
      * Query data dan total dilakukan secara paralel.
      */
     const [users, total] = await Promise.all([
       this.prisma.user.findMany({
+        where,
+
         skip,
         take: limit,
 
@@ -105,7 +137,7 @@ export class UsersService {
         },
       }),
 
-      this.prisma.user.count(),
+      this.prisma.user.count({ where }),
     ]);
 
     return {
@@ -124,6 +156,35 @@ export class UsersService {
     const data: Prisma.UserUpdateInput = {
       ...updateUserDto,
     };
+
+    /*
+     * Cek duplikat username/email sebelum update.
+     */
+    if (updateUserDto.username || updateUserDto.email) {
+      const or: Prisma.UserWhereInput[] = [];
+
+      if (updateUserDto.username) {
+        or.push({ username: updateUserDto.username });
+      }
+
+      if (updateUserDto.email) {
+        or.push({ email: updateUserDto.email });
+      }
+
+      const existing = await this.prisma.user.findFirst({
+        where: {
+          NOT: { id },
+          OR: or,
+        },
+      });
+
+      if (existing) {
+        const field =
+          existing.username === updateUserDto.username ? 'username' : 'email';
+
+        throw new ConflictException(`${field} sudah terdaftar`);
+      }
+    }
 
     try {
       const user = await this.prisma.user.update({
@@ -144,15 +205,10 @@ export class UsersService {
     }
   }
 
-  /*
-   * Update password khusus flow auth
-   * (menerima password yang sudah di-hash).
-   */
-  async updatePassword(id: number, hashedPassword: string): Promise<void> {
+  async remove(id: number) {
     try {
-      await this.prisma.user.update({
+      await this.prisma.user.delete({
         where: { id },
-        data: { password: hashedPassword },
       });
     } catch (error) {
       if (
@@ -164,12 +220,6 @@ export class UsersService {
 
       throw error;
     }
-  }
-
-  async remove(id: number) {
-    await this.prisma.user.delete({
-      where: { id },
-    });
 
     return {
       message: `User ${id} dihapus`,
